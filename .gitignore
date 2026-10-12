@@ -1,4 +1,5 @@
 target/
+*:Zone.Identifier
 !.mvn/wrapper/maven-wrapper.jar
 
 ### IntelliJ IDEA ###
