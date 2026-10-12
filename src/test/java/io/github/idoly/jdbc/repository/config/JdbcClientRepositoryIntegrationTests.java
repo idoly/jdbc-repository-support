@@ -1,80 +1,65 @@
 package io.github.idoly.jdbc.repository.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import org.junit.jupiter.api.Test;
-import org.springframework.boot.autoconfigure.AutoConfigurations;
-import org.springframework.boot.data.jdbc.autoconfigure.DataJdbcRepositoriesAutoConfiguration;
-import org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration;
-import org.springframework.boot.jdbc.autoconfigure.DataSourceTransactionManagerAutoConfiguration;
-import org.springframework.boot.jdbc.autoconfigure.JdbcClientAutoConfiguration;
-import org.springframework.boot.jdbc.autoconfigure.JdbcTemplateAutoConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
-import org.springframework.boot.transaction.autoconfigure.TransactionAutoConfiguration;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.data.annotation.Id;
 import org.springframework.data.jdbc.repository.config.EnableJdbcRepositories;
-import org.springframework.data.relational.core.mapping.Table;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.transaction.annotation.Transactional;
 
-import io.github.idoly.jdbc.repository.JdbcRepository;
+import io.github.idoly.jdbc.repository.testsupport.JdbcTestSupport;
+import io.github.idoly.jdbc.repository.testsupport.JdbcTestSupport.Sample;
+import io.github.idoly.jdbc.repository.testsupport.JdbcTestSupport.SampleRepository;
 
 class JdbcClientRepositoryIntegrationTests {
 
-    private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
-            .withConfiguration(AutoConfigurations.of(
-                    DataSourceAutoConfiguration.class,
-                    JdbcTemplateAutoConfiguration.class,
-                    JdbcClientAutoConfiguration.class,
-                    DataSourceTransactionManagerAutoConfiguration.class,
-                    TransactionAutoConfiguration.class,
-                    DataJdbcRepositoriesAutoConfiguration.class,
-                    JdbcClientRepositoryAutoConfiguration.class))
-            .withUserConfiguration(RepositoryConfiguration.class)
-            .withPropertyValues(
-                    "spring.datasource.url=jdbc:h2:mem:repository-integration;DB_CLOSE_DELAY=-1",
-                    "spring.datasource.username=sa",
-                    "spring.datasource.password=");
+    private final ApplicationContextRunner runner = JdbcTestSupport.runner(RepositoryConfiguration.class);
 
     @Test
-    void invokesJdbcClientThroughRepositoryProxy() {
-        contextRunner.run(context -> {
+    void sharesDataBetweenCrudAndDefaultSqlMethods() {
+        runner.run(context -> {
             assertThat(context).hasNotFailed();
-            JdbcClient jdbcClient = context.getBean(JdbcClient.class);
-            jdbcClient.sql("CREATE TABLE sample (id BIGINT PRIMARY KEY, name VARCHAR(50))").update();
-            jdbcClient.sql("INSERT INTO sample (id, name) VALUES (1, 'alpha')").update();
+            JdbcTestSupport.createTable(context.getBean(JdbcClient.class));
+            UserRepository repository = context.getBean(UserRepository.class);
 
-            SampleRepository repository = context.getBean(SampleRepository.class);
+            Sample saved = repository.save(new Sample(null, "alpha"));
 
+            assertThat(repository.findName(saved.id())).isEqualTo("alpha");
             assertThat(repository.countRows()).isEqualTo(1L);
-            assertThat(repository.findName(1L)).isEqualTo("alpha");
+        });
+    }
+
+    @Test
+    void rollsBackCrudAndSqlTogether() {
+        runner.run(context -> {
+            assertThat(context).hasNotFailed();
+            JdbcTestSupport.createTable(context.getBean(JdbcClient.class));
+            UserRepository repository = context.getBean(UserRepository.class);
+
+            assertThatThrownBy(repository::saveAndInsertThenFail)
+                    .isInstanceOf(IllegalStateException.class).hasMessage("rollback");
+            assertThat(repository.count()).isZero();
+            assertThat(repository.countRows()).isZero();
         });
     }
 
     @Configuration(proxyBeanMethods = false)
-    @EnableJdbcRepositories(
-            basePackageClasses = SampleRepository.class,
-            considerNestedRepositories = true)
+    @EnableJdbcRepositories(basePackageClasses = UserRepository.class, considerNestedRepositories = true)
     static class RepositoryConfiguration {
     }
 
-    interface SampleRepository extends JdbcRepository<Sample, Long> {
+    interface UserRepository extends SampleRepository {
 
-        default long countRows() {
-            return sql("SELECT COUNT(*) FROM sample")
-                    .query(Long.class)
-                    .single();
+        @Transactional
+        default void saveAndInsertThenFail() {
+            Sample saved = save(new Sample(null, "crud"));
+            assertThat(findName(saved.id())).isEqualTo("crud");
+            sql("INSERT INTO sample (name) VALUES ('sql')").update();
+            assertThat(count()).isEqualTo(2L);
+            throw new IllegalStateException("rollback");
         }
-
-        default String findName(long id) {
-            return sql("SELECT name FROM sample WHERE id = :id")
-                    .param("id", id)
-                    .query(String.class)
-                    .single();
-        }
-    }
-
-    @Table("sample")
-    record Sample(@Id Long id, String name) {
     }
 }
